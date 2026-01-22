@@ -1,3 +1,5 @@
+// RUN: standalone-opt %s
+
 func.func @fc_relu(%lhs: tensor<512x512xf32>, %rhs: tensor<512x512xf32>,
                    %bias: tensor<512x512xf32>, %output: tensor<512x512xf32>)
                    -> tensor<512x512xf32> {

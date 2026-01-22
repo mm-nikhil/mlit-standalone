@@ -2,6 +2,7 @@
 // Running `standalone-opt -transform-interpreter` will interpret the transform
 // sequence and rewrite the payload (tile + fuse) while leaving the transform IR
 // in the output for inspection.
+// RUN: standalone-opt -transform-interpreter %s
 
 #map = affine_map<(d0, d1) -> (d0, d1)>
 #map1 = affine_map<(d0, d1) -> ()>
