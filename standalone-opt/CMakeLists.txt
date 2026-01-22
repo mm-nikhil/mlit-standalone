@@ -4,6 +4,13 @@ set(LIBS
         ${dialect_libs}
         ${conversion_libs}
         MLIROptLib
+        MLIRRegisterAllDialects
+        MLIRRegisterAllExtensions
+        MLIRRegisterAllPasses
+        MLIRTransformDialect
+        MLIRTransformDialectTransforms
+        MLIRLinalgTransformOps
+        MLIRLinalgDialect
         MLIRStandalone
         )
 add_llvm_executable(standalone-opt standalone-opt.cpp)

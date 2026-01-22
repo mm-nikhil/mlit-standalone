@@ -22,3 +22,12 @@ CMake so that it installs `FileCheck` to the chosen installation prefix.
 ## License
 
 This dialect template is made available under the Apache License 2.0 with LLVM Exceptions. See the `LICENSE.txt` file for more details.
+
+## MLIR-Build
+
+cmake -G Ninja -S ~/workspace/mlir-standalone -B ~/workspace/mlir-standalone/build \
+  -DMLIR_DIR=~/workspace/llvm-project/build/lib/cmake/mlir \
+  -DLLVM_EXTERNAL_LIT=~/workspace/llvm-project/build/bin/llvm-lit
+
+cmake --build ~/workspace/mlir-standalone/build
+ninja -j $(nproc)

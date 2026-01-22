@@ -8,7 +8,15 @@
 
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/TransformOps/DialectExtension.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/InitAllDialects.h"
+#include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
@@ -23,17 +31,19 @@
 #include "Standalone/StandaloneOpsDialect.cpp.inc"
 
 int main(int argc, char **argv) {
+  // Register all upstream MLIR passes so standalone-opt can use any of them
+  // from the command line, including the transform interpreter pass.
   mlir::registerAllPasses();
   // TODO: Register standalone passes here.
 
   mlir::DialectRegistry registry;
+  // Register the custom dialect defined in this repo.
   registry.insert<mlir::standalone::StandaloneDialect>();
-  registry.insert<mlir::func::FuncDialect>();
-  registry.insert<mlir::arith::ArithDialect>();
-  // Add the following to include *all* MLIR Core dialects, or selectively
-  // include what you need like above. You only need to register dialects that
-  // will be *parsed* by the tool, not the one generated
-  // registerAllDialects(registry);
+  // Register all upstream dialects and extensions so transform scripts can
+  // freely materialize ops like scf.for, tensor.extract_slice, etc., without
+  // missing registrations or external interface models.
+  mlir::registerAllDialects(registry);
+  mlir::registerAllExtensions(registry);
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Standalone optimizer driver\n", registry));
