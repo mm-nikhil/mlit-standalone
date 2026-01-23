@@ -1,97 +1,125 @@
-// Re-usable matcher: take an op handle and assert it is a linalg.matmul.
-// Returns the SAME handle (now verified) so it can be re-used as a “filter”.
-transform.named_sequence @match_matmul(%op: !transform.any_op {transform.readonly})
-    -> !transform.any_op {
-  // Checks operation name == "linalg.matmul".
-  // If it doesn't match, this emits a (silenceable) failure.
-  transform.match.operation_name %op ["linalg.matmul"] : !transform.any_op
+// This file embeds a Transform dialect schedule next to the payload IR.
+// Running `standalone-opt -transform-interpreter` will interpret the transform
+// sequence and rewrite the payload (tile + fuse) while leaving the transform IR
+// in the output for inspection.
+// RUN: standalone-opt -transform-interpreter %s
 
-  // Return the (verified) handle.
-  transform.yield %op : !transform.any_op
-}
+#map = affine_map<(d0, d1) -> (d0, d1)>
+#map1 = affine_map<(d0, d1) -> ()>
 
-transform.named_sequence @tile_policy(
-    %root: !transform.any_op {transform.readonly},
-    %m_tile: !transform.param<i64> {transform.readonly},
-    %n_tile: !transform.param<i64> {transform.readonly},
-    %k_tile: !transform.param<i64> {transform.readonly}) {
+module attributes {transform.with_named_sequence} {
 
-  // 1) Collect all matmuls under %root.
-  // IMPORTANT: this handle may be associated with *a list* of ops.
-  %matmul = transform.collect_matching @match_matmul in %root
-    : (!transform.any_op) -> !transform.any_op
+  transform.named_sequence @tile_policy_multilevel(
+      %root: !transform.any_op {transform.readonly},
+      %m_l2: !transform.param<i64> {transform.readonly},
+      %n_l2: !transform.param<i64> {transform.readonly},
+      %k_l2: !transform.param<i64> {transform.readonly},
+      %m_l1: !transform.param<i64> {transform.readonly},
+      %n_l1: !transform.param<i64> {transform.readonly},
+      %k_l1: !transform.param<i64> {transform.readonly}) {
 
-  // 2) Walk forward through single-consumer chain.
-  // %matmul[0] means: "take the first op in the handle’s op-list".
-  // This silently bakes in: "there is exactly one matmul we care about".
-  %add = transform.get_consumers_of_result %matmul[0]
-    : (!transform.any_op) -> !transform.any_op
+    // Match operations.
+    %matmul = transform.structured.match ops{["linalg.matmul"]} in %root
+      : (!transform.any_op) -> !transform.any_op
+    %add = transform.structured.match ops{["linalg.elementwise"]}
+      attributes{kind = #linalg.elementwise_kind<add>} in %root
+        : (!transform.any_op) -> !transform.any_op
+    %relu = transform.structured.match ops{["linalg.elementwise"]}
+      attributes{kind = #linalg.elementwise_kind<max_signed>} in %root
+        : (!transform.any_op) -> !transform.any_op
 
-  // Same assumption: exactly one consumer of add-result (the relu).
-  %relu = transform.get_consumers_of_result %add[0]
-    : (!transform.any_op) -> !transform.any_op
+    // L2 tiling (outer tiles).
+    %matmul_l2, %l2_m, %l2_n, %l2_k =
+      transform.structured.tile_using_for %matmul tile_sizes [%m_l2, %n_l2, %k_l2]
+        : (!transform.any_op, !transform.param<i64>, !transform.param<i64>, !transform.param<i64>)
+          -> (!transform.any_op, !transform.any_op, !transform.any_op, !transform.any_op)
 
-  // Debug prints: useful while developing. Fine.
-  transform.debug.emit_remark_at %matmul, "tile_policy: matmul" : !transform.any_op
-  transform.debug.emit_remark_at %add, "tile_policy: add" : !transform.any_op
-  transform.debug.emit_remark_at %relu, "tile_policy: relu" : !transform.any_op
+    // L1 tiling (inner tiles).
+    %matmul_l1, %l1_m, %l1_n, %l1_k =
+      transform.structured.tile_using_for %matmul_l2 tile_sizes [%m_l1, %n_l1, %k_l1]
+        : (!transform.any_op, !transform.param<i64>, !transform.param<i64>, !transform.param<i64>)
+          -> (!transform.any_op, !transform.any_op, !transform.any_op, !transform.any_op)
 
-  transform.debug.emit_param_as_remark %m_tile, "tile m" at %relu
-    : !transform.param<i64>, !transform.any_op
-  transform.debug.emit_param_as_remark %n_tile, "tile n" at %relu
-    : !transform.param<i64>, !transform.any_op
-  transform.debug.emit_param_as_remark %k_tile, "tile k" at %relu
-    : !transform.param<i64>, !transform.any_op
+    // Tile epilogue (M/N only, matching L2 tile size).
+    %relu_tiled, %relu_m, %relu_n =
+      transform.structured.tile_using_for %relu tile_sizes [%m_l2, %n_l2]
+        : (!transform.any_op, !transform.param<i64>, !transform.param<i64>)
+          -> (!transform.any_op, !transform.any_op, !transform.any_op)
 
-  // 3) Tile+fuse on the CONSUMER (relu).
-  //
-  // Semantics: create loops for the relu iteration space (M,N),
-  // then "pull in" producer computations needed for each tile.
-  //
-  // This is the structured-fusion trick the tutorial highlights:
-  // tile the last op, then fuse producers into the loop nest. :contentReference[oaicite:2]{index=2}
-  //
-  // Returned handles:
-  //   %relu_tiled  -> the tiled relu op (new payload op)
-  //   %tile_i/%tile_j -> handles to the generated loops (or loop-like containers),
-  //                      depending on the implementation of structured.fuse.
-  %relu_tiled, %tile_i, %tile_j =
-    transform.structured.fuse %relu tile_sizes [%m_tile, %n_tile]
-      : (!transform.any_op, !transform.param<i64>, !transform.param<i64>)
-        -> (!transform.any_op, !transform.any_op, !transform.any_op)
+    // Fuse add into the relu loop.
+    %add_fused, %loop_with_add =
+      transform.structured.fuse_into_containing_op %add into %relu_m
+        : (!transform.any_op, !transform.any_op) -> (!transform.any_op, !transform.any_op)
 
-  // 4) Find the matmul *inside* the tiled region and tile K there.
-  //
-  // You are currently searching inside %tile_j specifically.
-  // That assumes:
-  //   - %tile_j is a container op that actually *contains* the fused matmul
-  //   - and the matmul ended up nested under that particular handle
-  //
-  // In practice, it’s safer to search in the tiled relu op or in the outer loop,
-  // because “which loop handle contains what” can change as implementations evolve.
-  %matmul_inner = transform.collect_matching @match_matmul in %tile_j
-    : (!transform.any_op) -> !transform.any_op
+    // Cleanup.
+    %func = transform.get_parent_op %relu_m : (!transform.any_op) -> !transform.any_op
+    transform.apply_cse to %func : !transform.any_op
+    transform.apply_patterns to %func {
+      transform.apply_patterns.canonicalization
+    } : !transform.any_op
 
-  // Tile the reduction dimension (K).
-  // tile_sizes [0, 0, %k_tile] means:
-  //   - do not tile M (i)
-  //   - do not tile N (j)
-  //   - split/tile K by %k_tile
-  //
-  // Implementation typically produces an scf.for over k blocks and threads an
-  // accumulator via iter_args/yield (that’s the "reduction in K"). 
-  %matmul_k, %k_loop =
-    transform.structured.tile_using_for %matmul_inner tile_sizes [0, 0, %k_tile]
-      : (!transform.any_op, !transform.param<i64>)
-        -> (!transform.any_op, !transform.any_op)
+    transform.yield
+  }
 
-  transform.debug.emit_remark_at %matmul_k, "tile_policy: matmul k-tiled"
-    : !transform.any_op
+  transform.named_sequence @tile_policy_multilevel_x86(
+      %root: !transform.any_op {transform.readonly}) {
+    %m_l2 = transform.param.constant 128 : i64 -> !transform.param<i64>
+    %n_l2 = transform.param.constant 128 : i64 -> !transform.param<i64>
+    %k_l2 = transform.param.constant 256 : i64 -> !transform.param<i64>
+    %m_l1 = transform.param.constant 32 : i64 -> !transform.param<i64>
+    %n_l1 = transform.param.constant 32 : i64 -> !transform.param<i64>
+    %k_l1 = transform.param.constant 32 : i64 -> !transform.param<i64>
+    transform.include @tile_policy_multilevel failures(propagate)
+      (%root, %m_l2, %n_l2, %k_l2, %m_l1, %n_l1, %k_l1)
+        : (!transform.any_op, !transform.param<i64>, !transform.param<i64>, !transform.param<i64>,
+           !transform.param<i64>, !transform.param<i64>, !transform.param<i64>) -> ()
+    transform.yield
+  }
 
-  // 5) Cleanup: CSE on the function containing the transformed ops.
-  // Good instinct: don’t run CSE on the module containing transform IR.
-  %func = transform.get_parent_op %matmul_k : (!transform.any_op) -> !transform.any_op
-  transform.apply_cse to %func : !transform.any_op
+  transform.named_sequence @__transform_main(%root: !transform.any_op) {
+    transform.include @tile_policy_multilevel_x86 failures(propagate) (%root)
+      : (!transform.any_op) -> ()
+    transform.yield
+  }
 
-  transform.yield
+  // --- Payload IR ---------------------------------------------------------
+  // Payload copied from matmul-fc-relu.mlir (elementwise ops).
+  func.func @fc_relu(%lhs: tensor<512x512xf32>, %rhs: tensor<512x512xf32>,
+                     %bias: tensor<512x512xf32>, %output: tensor<512x512xf32>)
+                     -> tensor<512x512xf32> {
+    // Matrix-matrix multiplication.
+    %matmul = linalg.matmul ins(%lhs, %rhs: tensor<512x512xf32>, tensor<512x512xf32>)
+                            outs(%output: tensor<512x512xf32>) -> tensor<512x512xf32>
+
+    // Elementwise addition.
+    %biased = linalg.elementwise kind=#linalg.elementwise_kind<add>
+      ins(%matmul, %bias : tensor<512x512xf32>, tensor<512x512xf32>)
+      outs(%output : tensor<512x512xf32>) -> tensor<512x512xf32>
+
+    // Elementwise max with 0 (ReLU).
+    %c0f = arith.constant 0.0 : f32
+    %relued = linalg.elementwise kind=#linalg.elementwise_kind<max_signed>
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> ()>, affine_map<(d0, d1) -> (d0, d1)>]
+      ins(%biased, %c0f : tensor<512x512xf32>, f32)
+      outs(%output : tensor<512x512xf32>) -> tensor<512x512xf32>
+    func.return %relued : tensor<512x512xf32>
+  }
+
+  func.func @main() {
+    %c0 = arith.constant 0.0 : f32
+    %c1 = arith.constant 1.0 : f32
+    %c2 = arith.constant 2.0 : f32
+    %lhs0 = tensor.empty() : tensor<512x512xf32>
+    %rhs0 = tensor.empty() : tensor<512x512xf32>
+    %bias0 = tensor.empty() : tensor<512x512xf32>
+    %out0 = tensor.empty() : tensor<512x512xf32>
+    %lhs = linalg.fill ins(%c1 : f32) outs(%lhs0 : tensor<512x512xf32>) -> tensor<512x512xf32>
+    %rhs = linalg.fill ins(%c2 : f32) outs(%rhs0 : tensor<512x512xf32>) -> tensor<512x512xf32>
+    %bias = linalg.fill ins(%c0 : f32) outs(%bias0 : tensor<512x512xf32>) -> tensor<512x512xf32>
+    %out = linalg.fill ins(%c0 : f32) outs(%out0 : tensor<512x512xf32>) -> tensor<512x512xf32>
+    %res = call @fc_relu(%lhs, %rhs, %bias, %out)
+      : (tensor<512x512xf32>, tensor<512x512xf32>, tensor<512x512xf32>,
+         tensor<512x512xf32>) -> tensor<512x512xf32>
+    func.return
+  }
 }

@@ -6,13 +6,18 @@ import subprocess
 import sys
 import time
 
+TIMEOUT_S = 60
+
 
 def run_cmd(cmd, *, stdout_path=None):
-    if stdout_path is None:
-        subprocess.run(cmd, check=True)
-        return
-    with open(stdout_path, "w", encoding="utf-8") as handle:
-        subprocess.run(cmd, check=True, stdout=handle)
+    try:
+        if stdout_path is None:
+            subprocess.run(cmd, check=True, timeout=TIMEOUT_S)
+            return
+        with open(stdout_path, "w", encoding="utf-8") as handle:
+            subprocess.run(cmd, check=True, stdout=handle, timeout=TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"timeout: command exceeded {TIMEOUT_S}s")
 
 
 def build_pipeline(transform_opts=None, erase_transform=False):
@@ -36,6 +41,7 @@ def build_pipeline(transform_opts=None, erase_transform=False):
         "convert-scf-to-cf",
         "expand-strided-metadata",
         "lower-affine",
+        "convert-ub-to-llvm",
         "convert-arith-to-llvm",
         "finalize-memref-to-llvm",
         "convert-func-to-llvm",
@@ -68,14 +74,17 @@ def time_runner(mlir_runner, lowered_path, shared_libs, runs):
     times = []
     for _ in range(runs):
         start = time.perf_counter()
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, timeout=TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise SystemExit(f"timeout: command exceeded {TIMEOUT_S}s")
         times.append(time.perf_counter() - start)
     return times
 
 
 def parse_tilesize(value):
     parts = value.split(",")
-    if len(parts) != 3:
+    if len(parts) not in (3, 6):
         raise SystemExit(f"Invalid --tilesize value: {value}")
     return tuple(int(part.strip()) for part in parts)
 
@@ -101,7 +110,7 @@ def main():
         "--tilesize",
         action="append",
         default=[],
-        help="Comma-separated M,N,K sizes for transform entry points.",
+        help="Comma-separated sizes (M,N,K) or (M2,N2,K2,M1,N1,K1) for multilevel.",
     )
     args = parser.parse_args()
 
@@ -126,6 +135,12 @@ def main():
         raise SystemExit(f"MLIR file not found: {args.mlir_file}")
 
     tile_sizes = [parse_tilesize(value) for value in args.tilesize]
+    if tile_sizes:
+        tile_arity = len(tile_sizes[0])
+        if any(len(tile) != tile_arity for tile in tile_sizes):
+            raise SystemExit("All --tilesize values must use the same arity.")
+    else:
+        tile_arity = None
     if tile_sizes and not args.transform:
         args.transform = True
 
@@ -153,7 +168,9 @@ def main():
             if args.entry_point:
                 transform_entry = args.entry_point
             elif tile_sizes:
-                transform_entry = "tile_policy"
+                transform_entry = (
+                    "tile_policy_multilevel" if tile_arity == 6 else "tile_policy"
+                )
             else:
                 transform_entry = "__transform_main"
             if transform_entry not in entry_points:
@@ -173,6 +190,21 @@ def main():
                     )
             if transform_entry == "tile_policy" and not tile_sizes:
                 raise SystemExit("entry point 'tile_policy' requires --tilesize M,N,K")
+            if transform_entry == "tile_policy_multilevel" and not tile_sizes:
+                raise SystemExit(
+                    "entry point 'tile_policy_multilevel' requires --tilesize "
+                    "M2,N2,K2,M1,N1,K1"
+                )
+            if tile_sizes:
+                if transform_entry == "tile_policy" and tile_arity != 3:
+                    raise SystemExit(
+                        "entry point 'tile_policy' requires --tilesize M,N,K"
+                    )
+                if transform_entry == "tile_policy_multilevel" and tile_arity != 6:
+                    raise SystemExit(
+                        "entry point 'tile_policy_multilevel' requires --tilesize "
+                        "M2,N2,K2,M1,N1,K1"
+                    )
 
     out_dir = repo_root / "build"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -183,23 +215,29 @@ def main():
         print(f"{name}: avg={avg:.6f}s best={best:.6f}s runs={values}")
 
     if tile_sizes:
-        for m_tile, n_tile, k_tile in tile_sizes:
-            lowered_path = out_dir / (
-                f"{input_path.stem}_lowered_m{m_tile}_n{n_tile}_k{k_tile}.mlir"
-            )
+        for tile in tile_sizes:
+            if tile_arity == 3:
+                m_tile, n_tile, k_tile = tile
+                name = f"m{m_tile}_n{n_tile}_k{k_tile}"
+                args_str = f"{m_tile},#{n_tile},#{k_tile}"
+                label = f"m={m_tile} n={n_tile} k={k_tile}"
+            else:
+                m2, n2, k2, m1, n1, k1 = tile
+                name = f"m2{m2}_n2{n2}_k2{k2}_m1{m1}_n1{n1}_k1{k1}"
+                args_str = f"{m2},#{n2},#{k2},#{m1},#{n1},#{k1}"
+                label = f"m2={m2} n2={n2} k2={k2} m1={m1} n1={n1} k1={k1}"
+            lowered_path = out_dir / f"{input_path.stem}_lowered_{name}.mlir"
             transform_opts = [
                 f"entry-point={transform_entry}",
-                f"debug-bind-trailing-args=#{m_tile},#{n_tile},#{k_tile}",
+                f"debug-bind-trailing-args=#{args_str}",
             ]
             pipeline_arg = build_pipeline(
                 transform_opts=transform_opts, erase_transform=erase_transform
             )
             compile_time = lower_mlir(mlir_opt, input_path, lowered_path, pipeline_arg)
             exec_times = time_runner(mlir_runner, lowered_path, shared_libs, args.runs)
-            print(
-                f"compile (m={m_tile} n={n_tile} k={k_tile}): {compile_time:.6f}s"
-            )
-            summarize(f"exec (m={m_tile} n={n_tile} k={k_tile})", exec_times)
+            print(f"compile ({label}): {compile_time:.6f}s")
+            summarize(f"exec ({label})", exec_times)
     else:
         lowered_path = out_dir / f"{input_path.stem}_lowered.mlir"
         transform_opts = (

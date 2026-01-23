@@ -44,3 +44,13 @@ resulting payload IR, run the transform interpreter pass:
 
 This invokes the `transform-interpreter` pass (default entry point
 `__transform_main`) and prints the rewritten IR.
+
+## Benchmarking 
+
+```
+python3 tools/benchmark.py test/Standalone/matmul-fc-relu-transformed.mlir \
+--transform --runs 3 \
+--tilesize 128,128,256,32,32,32 \
+--tilesize 256,256,128,64,64,32 \
+--tilesize 256,256,8,64,64,64
+```
