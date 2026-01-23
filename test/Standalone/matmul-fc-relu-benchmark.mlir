@@ -1,3 +1,4 @@
+// RUN: standalone-opt %s
 // Baseline (untiled) payload + simple main for CPU runner.
 
 func.func @fc_relu(%lhs: tensor<512x512xf32>, %rhs: tensor<512x512xf32>,
