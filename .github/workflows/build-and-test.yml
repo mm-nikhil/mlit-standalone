@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Get Template Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: clang-format
         uses: DoozyX/clang-format-lint-action@v0.6
         with:
@@ -29,18 +29,18 @@ jobs:
           echo "$GITHUB_WORKSPACE/llvm-project/prefix/bin" >> "$GITHUB_PATH"
           pip install --upgrade cmake
       - name: Get Template Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           path: 'mlir-standalone-template'
       - name: Cache LLVM
         id: cache-llvm
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: llvm-project
           key: ${{ runner.os }}-llvm-install-${{ env.LLVM_COMMIT }}
       - name: Get LLVM
         if: steps.cache-llvm.outputs.cache-hit != 'true'
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           repository: 'llvm/llvm-project'
           ref: '${{ env.LLVM_COMMIT }}'
@@ -65,4 +65,3 @@ jobs:
           cd $GITHUB_WORKSPACE/mlir-standalone-template/build
           cmake $GITHUB_WORKSPACE/mlir-standalone-template -DCMAKE_BUILD_TYPE=Release ${{ env.CMAKE_FLAGS }}
           cmake --build . --target check-standalone-opt -- -j$(nproc)
-
