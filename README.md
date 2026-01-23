@@ -31,3 +31,16 @@ cmake -G Ninja -S ~/workspace/mlir-standalone -B ~/workspace/mlir-standalone/bui
 
 cmake --build ~/workspace/mlir-standalone/build
 ninja -j $(nproc)
+
+## Transform Interpreter
+
+To apply a Transform dialect schedule embedded in a `.mlir` file and dump the
+resulting payload IR, run the transform interpreter pass:
+
+```sh
+./build/bin/standalone-opt -transform-interpreter test/Standalone/matmul-fc-relu-transformed.mlir \
+  > build/transformed.mlir
+```
+
+This invokes the `transform-interpreter` pass (default entry point
+`__transform_main`) and prints the rewritten IR.

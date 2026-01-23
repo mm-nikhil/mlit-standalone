@@ -34,6 +34,7 @@ Any learnings during execution should be added in Notable learnings section.
 - This environment blocks Python multiprocessing semaphores; use the serial lit wrapper.
 - Local x86 target is i5-13420H (8 cores/12 threads); caches: L1d 48KB/core, L2 1.3MB per cache instance (7MB total), L3 12MB shared; AVX2+FMA available.
 - For f32 512x512 matmul, reasonable starting tiles are L2: M=N=128, K=64 or 128; L1: M=N=32 or 64, K=32 (multiples of 8 for AVX2).
+- `transform-interpreter` supports `entry-point=` and `debug-bind-trailing-args=` for selecting policies and binding params.
 
 ## References (local)
 - Transform tutorial: `llvm-project/mlir/docs/Tutorials/transform/_index.md`
