@@ -267,8 +267,8 @@ module attributes {transform.with_named_sequence} {
     %n2 = transform.param.constant 256 : i64 -> !transform.param<i64>
     %k2 = transform.param.constant 8   : i64 -> !transform.param<i64>
     %m1 = transform.param.constant 64  : i64 -> !transform.param<i64>
-    %n1 = transform.param.constant 64  : i64 -> !transform.param<i64>
-    %k1 = transform.param.constant 64  : i64 -> !transform.param<i64>
+    %n1 = transform.param.constant 128  : i64 -> !transform.param<i64>
+    %k1 = transform.param.constant 8  : i64 -> !transform.param<i64>
     
     transform.include @tile_policy_multilevel failures(propagate)
       (%root, %m2, %n2, %k2, %m1, %n1, %k1)
